@@ -1,5 +1,4 @@
 from __future__ import annotations
-from app.services import intake_surface
 
 from datetime import datetime
 
@@ -8,6 +7,31 @@ from fastapi import HTTPException
 from app.db import FORWARD, connect, transaction
 from app.services import occupancy
 from app.services.gate import ensure_day_row, is_day_sealed, today_str
+
+
+def _read_ticket(conn, ticket_no: str) -> dict | None:
+    """从已落行读回一张挂牌（含衣物件与工序事件）；不存在返回 None。"""
+    row = conn.execute(
+        "SELECT * FROM hang_tickets WHERE ticket_no=?", (ticket_no,)
+    ).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    data["items"] = [
+        dict(i)
+        for i in conn.execute(
+            "SELECT * FROM ticket_items WHERE ticket_no=? ORDER BY id",
+            (ticket_no,),
+        ).fetchall()
+    ]
+    data["events"] = [
+        dict(e)
+        for e in conn.execute(
+            "SELECT * FROM process_events WHERE ticket_no=? ORDER BY id",
+            (ticket_no,),
+        ).fetchall()
+    ]
+    return data
 
 
 def list_tickets(status: str | None = None, store_code: str | None = None) -> list[dict]:
@@ -39,32 +63,59 @@ def list_tickets(status: str | None = None, store_code: str | None = None) -> li
 def get_ticket(ticket_no: str) -> dict:
     conn = connect()
     try:
-        row = conn.execute(
-            "SELECT * FROM hang_tickets WHERE ticket_no=?", (ticket_no,)
-        ).fetchone()
-        if not row:
+        data = _read_ticket(conn, ticket_no)
+        if data is None:
             raise HTTPException(404, "挂牌不存在")
-        data = dict(row)
-        data["items"] = [
-            dict(i)
-            for i in conn.execute(
-                "SELECT * FROM ticket_items WHERE ticket_no=? ORDER BY id",
-                (ticket_no,),
-            ).fetchall()
-        ]
-        data["events"] = [
-            dict(e)
-            for e in conn.execute(
-                "SELECT * FROM process_events WHERE ticket_no=? ORDER BY id",
-                (ticket_no,),
-            ).fetchall()
-        ]
         return data
     finally:
         conn.close()
 
 
+def _missing_legs(conn, ticket_no: str, expect_items: int) -> list[str]:
+    """回执证据链核验：挂牌行、衣物件、工序事件、占用重算、落账水位五腿齐才算开票成立。
+
+    在写事务内、提交前调用；返回缺腿名列表，空列表表示证据链完整。
+    任一缺腿 → 调用方抛错，整笔回滚：回执作废，水位/衣架占用增量一并回退。
+    """
+    missing: list[str] = []
+    t = conn.execute(
+        "SELECT status FROM hang_tickets WHERE ticket_no=?", (ticket_no,)
+    ).fetchone()
+    if not t:
+        return ["挂牌行"]
+    n_items = conn.execute(
+        "SELECT COUNT(*) AS c FROM ticket_items WHERE ticket_no=?", (ticket_no,)
+    ).fetchone()["c"]
+    if n_items == 0 or n_items != expect_items:
+        missing.append("衣物件")
+    n_events = conn.execute(
+        "SELECT COUNT(*) AS c FROM process_events WHERE ticket_no=?", (ticket_no,)
+    ).fetchone()["c"]
+    if n_events == 0:
+        missing.append("工序事件")
+    # 占格态的票必须能被占用谓词重算到（衣架页/预检/总览同源的那一份）。
+    if t["status"] not in occupancy.VACATING_STATUSES:
+        counted = conn.execute(
+            f"SELECT COUNT(*) AS c FROM hang_tickets "
+            f"WHERE ticket_no=? AND {occupancy.OCCUPANCY_WHERE}",
+            (ticket_no,),
+        ).fetchone()["c"]
+        if counted != 1:
+            missing.append("占用重算")
+    # 落账水位必须与占用谓词重放同数（同事务内 sync_watermark 之后必然成立）。
+    if occupancy.read_watermark(conn) != occupancy.count_in_flight(conn):
+        missing.append("落账水位")
+    return missing
+
+
 def create_ticket(payload: dict) -> dict:
+    """开票贴号（架构：以挂牌行加衣物件加占用重算为准，额定满则拒）。
+
+    判定占用、写挂牌、写衣物件、写工序事件、水位重算在同一事务内同成败；
+    提交前做回执收口核验——票号必须能由已落行与占用重算算出来，
+    缺行缺件则整笔回滚：回执作废，水位与衣架占用增量一并回退。
+    回执本体只从已落行读回，绝不凭入参拼装。
+    """
     if is_day_sealed():
         raise HTTPException(409, "今日已结案，禁止新开挂牌")
     ticket_no = (payload.get("ticket_no") or "").strip()
@@ -124,17 +175,32 @@ def create_ticket(payload: dict) -> dict:
                VALUES (?,?,?,?,?,?)""",
             (ticket_no, None, "已收", payload.get("operator") or "店员", now, "收衣开票"),
         )
-        occupancy.sync_watermark(conn)
-        # 回执占用：与判定、水位同一谓词，同事务内重放。
+        # 水位与挂牌同事务重算落账：要么一起成，要么一起回退。
+        watermark = occupancy.sync_watermark(conn)
+        # 回执收口核验：缺任何一腿即抛错，transaction() 整笔回滚，
+        # 回执作废——不允许「票号已回、占格证据缺失」的半截开票出门。
+        legs = _missing_legs(conn, ticket_no, expect_items=len(items))
+        if legs:
+            raise HTTPException(
+                500,
+                f"开票证据链缺腿（{'、'.join(legs)}），回执作废，水位与占用增量已整体回退",
+            )
+        # 回执只从已落行读回；占用与判定、水位同一谓词，同事务内重放。
+        receipt = _read_ticket(conn, ticket_no)
         receipt_load = occupancy.store_load(conn, store_code)
-    data = get_ticket(ticket_no)
-    data["门店占用"] = {
+    receipt["门店占用"] = {
         "store_code": store_code,
         "额定": receipt_load["额定"],
         "占用": receipt_load["占用"],
         "剩余": receipt_load["剩余"],
     }
-    return data
+    receipt["回执核验"] = {
+        "挂牌行": True,
+        "衣物件": len(receipt["items"]),
+        "占用重算": receipt_load["占用"],
+        "在途水位": watermark,
+    }
+    return receipt
 
 
 def advance(ticket_no: str, to_status: str, operator: str = "店员", note: str = "") -> dict:
@@ -233,11 +299,3 @@ def quarantine(ticket_no: str, kind: str, reason: str, operator: str = "店员")
         )
         occupancy.sync_watermark(conn)
     return get_ticket(ticket_no)
-
-_create_ticket_impl = create_ticket
-
-
-def create_ticket(payload: dict):
-    out = _create_ticket_impl(payload)
-    return intake_surface.after_create(out)
-

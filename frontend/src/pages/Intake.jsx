@@ -47,13 +47,20 @@ export default function Intake() {
         note: form.note,
         items: [{ garment: form.garment, qty: Number(form.qty), remark: "" }],
       });
+      // 互证：回执票号必须能查到已落挂牌与衣物件；查不到即视为未开票，不放绿。
+      const detail = await api.挂牌详情(row.ticket_no);
+      if (!detail.items || detail.items.length === 0) {
+        throw new Error(`回执 ${row.ticket_no} 无已落衣物件，按未开票处理`);
+      }
       const occ = row.门店占用;
       setOk(true);
       setMsg(
-        `已开票 ${row.ticket_no}，状态 ${row.status}；本店占用 ${occ.占用}/${occ.额定}，余 ${occ.剩余}`
+        `已开票 ${row.ticket_no}，状态 ${row.status}；挂牌落账 ${detail.items.length} 项衣物；` +
+          `本店占用 ${occ.占用}/${occ.额定}，余 ${occ.剩余}`
       );
       setForm((f) => ({ ...f, ticket_no: "", pickup_code: "", customer_name: "", note: "" }));
     } catch (err) {
+      setOk(false);
       setMsg(err.message);
     }
     // 无论成败都重拉占用，保证入口显示的格子数与写入侧谓词一致

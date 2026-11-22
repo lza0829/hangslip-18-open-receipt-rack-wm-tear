@@ -1,6 +1,6 @@
 """占用口径的唯一权威定义（全局只此一份）。
 
-架构选择（全局唯一）：**额定满则拒**。
+架构选择（全局唯一）：**以挂牌行加衣物件加占用重算为准，额定满则拒**。
 - 占用谓词：挂牌状态不在 VACATING_STATUSES（已取、丢失隔离）中，即占用本店一个格位；
   一张挂牌占一格，衣物件数量不改变占格数。
 - 额定格位 = stores.rack_count。
@@ -8,6 +8,11 @@
   使用本模块的同一谓词，禁止各写各的口径；页面上的占用必须能由该谓词重放出来。
 - 开票时「判定占用 + 写入挂牌」在同一事务内完成：满格则整笔 409 回滚，
   挂牌、衣物件、工序事件、水位增量都不落账，失败票不混入任何占用读路径。
+- 假开票收口：回执票号必须能由已落挂牌行、衣物件与占用重算算出来；
+  缺行或缺件则作废该回执，水位/衣架占用增量随同事务整体回退，
+  不允许「票号已回、占格证据缺失」的半截开票留在任何读路径上。
+- watermarks 表只是落账审计值：读路径一律用 count_in_flight 实时重放，
+  审计值与重放值的对账差异由日闸预检与总览亮出（如库被绕开应用改坏）。
 """
 
 from __future__ import annotations
@@ -76,6 +81,12 @@ def sync_watermark(conn) -> int:
     )
     return n
 
-def surface_store_hint(store_code: str) -> dict:
-    return {"store_code": store_code, "panel": "intake"}
 
+def read_watermark(conn) -> int:
+    """落账水位（审计值）。缺失按 0 计：此时只要在途重放非 0，对账即判不一致。
+
+    读路径展示一律用 count_in_flight 重放；本值只用于与重放值对账，
+    让「挂牌已落而水位未加」这类差异在日闸预检与总览上现形。
+    """
+    row = conn.execute("SELECT value FROM watermarks WHERE key='在途票'").fetchone()
+    return int(row["value"]) if row else 0

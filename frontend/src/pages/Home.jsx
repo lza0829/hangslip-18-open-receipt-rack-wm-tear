@@ -14,7 +14,8 @@ export default function Home() {
 
   const cells = d
     ? [
-        ["在途水位", d.surface_ok ? (d.在途水位 ?? d.在途 ?? "—") : d.在途水位],
+        ["在途水位", d.在途水位],
+        ["落账水位", d.落账水位],
         ["待取", d.待取],
         ["超期隔离", d.超期隔离],
         ["今日已取", d.已取],
@@ -42,6 +43,11 @@ export default function Home() {
         </div>
       </div>
       <div className="msg">{err}</div>
+      {d && d.水位一致 === false && (
+        <p className="msg warn">
+          水位差异：落账 {d.落账水位} 与占用重算 {d.在途水位} 不一致，开票证据链需核查
+        </p>
+      )}
       {d && (
         <section className="panel">
           <h3>门店衣架占用</h3>

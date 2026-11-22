@@ -59,6 +59,10 @@ export default function Gate() {
               <span>在途水位</span>
             </div>
             <div className="metric">
+              <b>{pre.落账水位}</b>
+              <span>落账水位</span>
+            </div>
+            <div className="metric">
               <b>{pre.占用合计}</b>
               <span>衣架占用合计</span>
             </div>
@@ -67,6 +71,12 @@ export default function Gate() {
               <span>水位核对</span>
             </div>
           </div>
+          {!pre.水位一致 && (
+            <p className="msg warn">
+              三账分叉：在途重算 {pre.在途水位} / 落账 {pre.落账水位} / 衣架合计{" "}
+              {pre.占用合计}，存在未同源的开票痕迹
+            </p>
+          )}
           {pre.超额门店.length > 0 && (
             <p className="msg">超额门店：{pre.超额门店.join("、")}</p>
           )}

@@ -313,6 +313,13 @@ th {
   margin-left: 6px;
 }
 
+.badge.超额 {
+  border-color: rgba(214, 69, 61, 0.85);
+  color: #f0a29d;
+  margin-left: 6px;
+  animation: pin-pulse 1.6s ease-in-out infinite;
+}
+
 .msg {
   margin: 8px 0 14px;
   color: #f0c2a0;
@@ -321,6 +328,12 @@ th {
 
 .msg.ok {
   color: #9fd6bd;
+}
+
+.msg.warn {
+  color: #f0a29d;
+  border: 1px solid rgba(214, 69, 61, 0.55);
+  padding: 6px 10px;
 }
 
 @keyframes pin-pulse {

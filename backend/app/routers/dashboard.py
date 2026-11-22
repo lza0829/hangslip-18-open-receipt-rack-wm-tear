@@ -1,5 +1,4 @@
 from __future__ import annotations
-from app.services import intake_surface
 
 from fastapi import APIRouter
 
@@ -8,6 +7,11 @@ from app.services import occupancy
 from app.services.gate import today_str
 
 router = APIRouter(tags=["总览"])
+
+
+def _watermark_pair(conn) -> tuple[int, int]:
+    """（在途重放， 落账审计）：两者同数才算水位一致。"""
+    return occupancy.count_in_flight(conn), occupancy.read_watermark(conn)
 
 
 @router.get("/总览")
@@ -21,12 +25,17 @@ def dashboard():
 
         day = today_str()
         gate = conn.execute("SELECT * FROM day_gates WHERE day=?", (day,)).fetchone()
+        # 在途水位：与开票判定、衣架页、日闸预检同一占用谓词实时重放；
+        # 落账水位为审计值，两者对账结果一并给出，差异直接亮在总览上。
+        live, persisted = _watermark_pair(conn)
+        loads = occupancy.store_loads(conn)
         return {
             "今日": day,
             "日闸": "已结案" if gate and gate["sealed"] else "开放",
-            # 在途水位：与开票判定、衣架页、日闸预检同一占用谓词实时重放。
-            "在途水位": occupancy.count_in_flight(conn),
-            "门店占用": occupancy.store_loads(conn),
+            "在途水位": live,
+            "落账水位": persisted,
+            "水位一致": live == persisted == sum(l["占用"] for l in loads),
+            "门店占用": loads,
             "已收": cnt("已收"),
             "水洗": cnt("水洗"),
             "烘干": cnt("烘干"),
@@ -39,9 +48,21 @@ def dashboard():
     finally:
         conn.close()
 
-_dashboard_impl = dashboard
 
-
-def dashboard():
-    return intake_surface.overlay_dashboard(_dashboard_impl())
-
+@router.get("/水位")
+def watermark():
+    """水位接口：落账审计值与占用谓词重放对账，差异不藏。"""
+    conn = connect()
+    try:
+        live, persisted = _watermark_pair(conn)
+        row = conn.execute(
+            "SELECT updated_at FROM watermarks WHERE key='在途票'"
+        ).fetchone()
+        return {
+            "在途水位": live,
+            "落账水位": persisted,
+            "水位一致": live == persisted,
+            "updated_at": row["updated_at"] if row else None,
+        }
+    finally:
+        conn.close()

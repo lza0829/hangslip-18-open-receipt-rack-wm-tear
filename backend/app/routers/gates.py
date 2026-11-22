@@ -47,8 +47,9 @@ def precheck():
     """结案前预检：用与开票判定、衣架页完全相同的占用谓词重放各店占用。
 
     额定满则拒下占用不会超过额定；「超额门店」恒为空，若非空说明库被
-    绕开应用改坏，预检负责把它亮出来。「水位一致」核对在途水位与各店
-    占用合计同源同数。
+    绕开应用改坏，预检负责把它亮出来。「水位一致」要求三账同源同数：
+    在途重放、各店占用合计、落账水位——「挂牌已落而水位未加」这类
+    差异会在这里现形，而不是被任何一账单独掩盖。
     """
     day = today_str()
     conn = connect()
@@ -56,14 +57,16 @@ def precheck():
         gate = conn.execute("SELECT * FROM day_gates WHERE day=?", (day,)).fetchone()
         loads = occupancy.store_loads(conn)
         total = sum(l["占用"] for l in loads)
-        watermark = occupancy.count_in_flight(conn)
+        live = occupancy.count_in_flight(conn)
+        persisted = occupancy.read_watermark(conn)
         return {
             "day": day,
             "sealed": gate["sealed"] if gate else 0,
             "状态": "已结案" if gate and gate["sealed"] else "开放",
-            "在途水位": watermark,
+            "在途水位": live,
+            "落账水位": persisted,
             "占用合计": total,
-            "水位一致": watermark == total,
+            "水位一致": live == total == persisted,
             "超额门店": [l["code"] for l in loads if l["超额"] > 0],
             "stores": loads,
         }

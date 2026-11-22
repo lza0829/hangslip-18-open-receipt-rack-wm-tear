@@ -230,3 +230,79 @@ def test_sealed_day_blocks_create(client):
     assert r.status_code == 409
     assert _scalar("SELECT COUNT(*) FROM hang_tickets") == 0
     assert client.get("/api/日闸/预检").json()["状态"] == "已结案"
+
+
+# ---------------------------------------------------------------- 假开票收口
+
+
+def test_receipt_is_recomputable_from_persisted_rows(client):
+    """回执票号必须能由已落行与占用重算算出来：详情、列表、衣物件、水位互证。"""
+    r = client.post("/api/挂牌", json=_payload("T-1"))
+    assert r.status_code == 200
+    body = r.json()
+    # 回执本体即已落行：核验腿齐全
+    assert body["回执核验"] == {"挂牌行": True, "衣物件": 1, "占用重算": 1, "在途水位": 1}
+    # 票号能查回挂牌详情与衣物件
+    detail = client.get("/api/挂牌/T-1").json()
+    assert detail["status"] == "已收"
+    assert [i["garment"] for i in detail["items"]] == ["衬衣"]
+    assert detail["events"][0]["to_status"] == "已收"
+    # 挂牌列表同一份事实
+    nos = [t["ticket_no"] for t in client.get("/api/挂牌").json()]
+    assert nos == ["T-1"]
+    # 水位接口与占用重放同数
+    wm = client.get("/api/水位").json()
+    assert wm["在途水位"] == wm["落账水位"] == 1
+    assert wm["水位一致"] is True
+    # 不留任何假开票表层痕迹
+    assert _scalar("SELECT COUNT(*) FROM settings WHERE key LIKE 'intake_surface%'") == 0
+    assert _scalar("SELECT COUNT(*) FROM watermarks WHERE key LIKE '店占用:%'") == 0
+
+
+def test_planted_ticket_without_watermark_shows_divergence(client):
+    """夹具「挂牌落水位未加」：读路径只认重算，预检与总览把差异亮出来。"""
+    assert client.post("/api/挂牌", json=_payload("T-1")).status_code == 200
+    # 绕开应用直接落一张票（不同步水位），模拟半截开票痕迹
+    conn = db.connect()
+    try:
+        conn.execute(
+            """INSERT INTO hang_tickets
+               (ticket_no, store_code, pickup_code, customer_name, status, opened_at, due_date, note)
+               VALUES ('T-X','S1','暗','某','已收','2026-01-01 00:00:00','2026-01-01','')"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # 衣架页/总览在途按谓词重算，如实数到这张票
+    assert _store(client.get("/api/门店").json(), "S1")["占用"] == 2
+    dash = client.get("/api/总览").json()
+    assert dash["在途水位"] == 2
+    assert dash["落账水位"] == 1
+    assert dash["水位一致"] is False
+    # 预检三账分叉：在途重算 ≠ 落账水位
+    pre = client.get("/api/日闸/预检").json()
+    assert pre["在途水位"] == 2
+    assert pre["落账水位"] == 1
+    assert pre["占用合计"] == 2
+    assert pre["水位一致"] is False
+    # 水位接口同样亮差异
+    assert client.get("/api/水位").json()["水位一致"] is False
+
+
+def test_hanger_page_and_precheck_never_diverge(client):
+    """夹具「衣架页与预检分叉」：两路读同一谓词，任何状态下都同数。"""
+    client.post("/api/挂牌", json=_payload("T-1"))
+    client.post("/api/挂牌", json=_payload("T-2", "S2"))
+    hanger = {s["code"]: s for s in client.get("/api/门店").json()}
+    pre = client.get("/api/日闸/预检").json()
+    for s in pre["stores"]:
+        h = hanger[s["code"]]
+        assert (s["占用"], s["额定"], s["剩余"], s["已满"]) == (
+            h["占用"],
+            h["额定"],
+            h["剩余"],
+            h["已满"],
+        )
+    assert pre["占用合计"] == sum(h["占用"] for h in hanger.values())
+    assert pre["水位一致"] is True

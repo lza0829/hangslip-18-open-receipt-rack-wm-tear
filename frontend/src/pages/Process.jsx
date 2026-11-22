@@ -42,6 +42,7 @@ export default function Process() {
             <th>票号</th>
             <th>门店</th>
             <th>顾客</th>
+            <th>衣物</th>
             <th>现行</th>
             <th>承诺日</th>
             <th>推进</th>
@@ -53,6 +54,9 @@ export default function Process() {
               <td>{r.ticket_no}</td>
               <td>{r.store_code}</td>
               <td>{r.customer_name}</td>
+              <td>
+                {(r.items || []).map((i) => `${i.garment}×${i.qty}`).join("、") || "—"}
+              </td>
               <td>
                 <span className={`badge ${r.status}`}>{r.status}</span>
               </td>

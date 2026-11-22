@@ -38,6 +38,7 @@ export default function Stores() {
               <td>
                 {r.active ? "在用" : "停用"}{" "}
                 {r.已满 && <span className="badge 已满">已满</span>}
+                {r.超额 > 0 && <span className="badge 超额">超额{r.超额}</span>}
               </td>
             </tr>
           ))}
